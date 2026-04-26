@@ -1,0 +1,45 @@
+{
+    "environment": {
+        "cloudflare_token": "your_cloudflare_api_token_here",
+        "cloudflare_zone_id": "your_cloudflare_zone_id_here",
+        "aliyun_access_key_id": "your_aliyun_access_key_id_here",
+        "aliyun_access_key_secret": "your_aliyun_access_key_secret_here"
+    },
+    "general": {
+        "get_ip": {
+            "interface": "eth0",
+            "urls": [
+                "https://ipv6.icanhazip.com",
+                "https://6.ipw.cn",
+                "https://v6.ipv6-test.com/api/myip.php"
+            ]
+        },
+        "log_output": "shell",
+        "proxy": ""
+    },
+    "records": [
+        {
+            "provider": "cloudflare",
+            "zone": "example.com",
+            "record": "dev",
+            "ttl": 300,
+            "proxied": false,
+            "use_proxy": false,
+            "cloudflare": {
+                "api_token": "$cloudflare_token",
+                "zone_id": "$cloudflare_zone_id"
+            }
+        },
+        {
+            "provider": "aliyun",
+            "zone": "example.cn",
+            "record": "www",
+            "ttl": 600,
+            "use_proxy": false,
+            "aliyun": {
+                "access_key_id": "$aliyun_access_key_id",
+                "access_key_secret": "$aliyun_access_key_secret"
+            }
+        }
+    ]
+}

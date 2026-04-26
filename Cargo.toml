@@ -1,0 +1,60 @@
+[package]
+name = "alcyone"
+version = "0.1.0"
+edition = "2021"
+description = "强大的动态 DNS 客户端 - 支持多域名多服务商 (Rust 版本)"
+authors = ["Alcyone Team"]
+license = "MIT"
+
+[dependencies]
+# JSON 处理
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# HTTP 客户端
+reqwest = { version = "0.11", features = ["json"], default-features = false }
+
+# 异步运行时
+tokio = { version = "1", features = ["full"] }
+
+# netlink (Linux)
+rtnetlink = "0.13"
+netlink-packet-route = "0.17"
+netlink-sys = "0.8"
+
+# futures
+futures = "0.3"
+
+# libc (BSD)
+libc = "0.2"
+
+# nix (BSD ioctl)
+nix = { version = "0.27", features = ["ioctl", "net"] }
+
+# 命令行参数解析
+clap = { version = "4.4", features = ["derive"] }
+
+# 日志
+log = "0.4"
+
+# 错误处理
+anyhow = "1.0"
+thiserror = "1.0"
+
+# 时间
+chrono = "0.4"
+
+# HMAC-SHA1 签名 (用于阿里云)
+hmac = "0.12"
+sha1 = "0.10"
+base64 = "0.21"
+
+# URL 编码
+percent-encoding = "2.3"
+
+# 异步 trait
+async-trait = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = true
