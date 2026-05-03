@@ -217,16 +217,8 @@ async fn main() {
                 }
             };
 
-            // 初始化日志
-            let log_output = if cfg.general.log_output.is_empty() || cfg.general.log_output == "shell" {
-                "shell".to_string()
-            } else if Path::new(&cfg.general.log_output).is_absolute() {
-                cfg.general.log_output.clone()
-            } else {
-                work_dir.join(&cfg.general.log_output).to_string_lossy().to_string()
-            };
-
-            if let Err(e) = log::init(&log_output) {
+            // 初始化日志（固定输出到 stdout，由 systemd/cron 管理）
+            if let Err(e) = log::init("shell") {
                 eprintln!("Failed to initialize logger: {}", e);
                 std::process::exit(1);
             }

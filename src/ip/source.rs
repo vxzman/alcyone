@@ -193,11 +193,11 @@ async fn get_interface_index(handle: &rtnetlink::Handle, iface_name: &str) -> an
 }
 
 // ============================================================================
-// BSD/macOS 实现 (使用 sysctl 获取 IPv6 地址和生命周期)
+// FreeBSD 实现 (使用 sysctl 获取 IPv6 地址和生命周期)
 // ============================================================================
 
-/// BSD/macOS 使用 sysctl 实现
-#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+/// FreeBSD 使用 sysctl 实现
+#[cfg(target_os = "freebsd")]
 pub async fn get_from_interface(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info>> {
     use std::ffi::CStr;
     use std::ptr;
@@ -207,7 +207,6 @@ pub async fn get_from_interface(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info
     #[repr(C)]
     #[derive(Clone, Copy)]
     struct sockaddr_in6 {
-        #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "macos"))]
         sin6_len: u8,
         sin6_family: u8,
         sin6_port: u16,
@@ -225,7 +224,6 @@ pub async fn get_from_interface(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info
     }
 
     // 定义 in6_ifaddr 结构（简化版，只包含我们需要的字段）
-    // FreeBSD 布局
     #[repr(C)]
     struct in6_ifaddr {
         ia_addr: sockaddr_in6,
@@ -268,25 +266,8 @@ pub async fn get_from_interface(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info
     // ========================================================================
     // 步骤 1: 使用 sysctl 获取 IPv6 地址列表（包含生命周期）
     // ========================================================================
-    
+
     // 构建 sysctl MIB: CTL_NET.AF_INET6.IPPROTO_IPV6.IPV6CTL_ADDRLIST
-    #[cfg(target_os = "freebsd")]
-    let mut mib = [
-        libc::CTL_NET as i32,
-        libc::AF_INET6 as i32,
-        libc::IPPROTO_IPV6 as i32,
-        22 as i32,  // IPV6CTL_ADDRLIST
-    ];
-    
-    #[cfg(target_os = "macos")]
-    let mut mib = [
-        libc::CTL_NET as i32,
-        libc::AF_INET6 as i32,
-        libc::IPPROTO_IPV6 as i32,
-        22 as i32,  // IPV6CTL_ADDRLIST
-    ];
-    
-    #[cfg(any(target_os = "openbsd", target_os = "netbsd"))]
     let mut mib = [
         libc::CTL_NET as i32,
         libc::AF_INET6 as i32,
@@ -481,8 +462,8 @@ pub async fn get_from_interface(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info
     }
 }
 
-/// BSD 降级方案（仅使用 getifaddrs，无生命周期）
-#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+/// FreeBSD 降级方案（仅使用 getifaddrs，无生命周期）
+#[cfg(target_os = "freebsd")]
 fn get_from_interface_fallback(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info>> {
     use std::ffi::CStr;
     use std::ptr;
@@ -491,7 +472,6 @@ fn get_from_interface_fallback(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info>
     #[repr(C)]
     #[derive(Clone, Copy)]
     struct sockaddr_in6 {
-        #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "macos"))]
         sin6_len: u8,
         sin6_family: u8,
         sin6_port: u16,
@@ -608,10 +588,10 @@ fn get_from_interface_fallback(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info>
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+#[cfg(target_os = "freebsd")]
 struct IfAddrsGuard(*mut ifaddrs);
 
-#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+#[cfg(target_os = "freebsd")]
 impl Drop for IfAddrsGuard {
     fn drop(&mut self) {
         unsafe {
@@ -623,17 +603,11 @@ impl Drop for IfAddrsGuard {
 }
 
 // ============================================================================
-// 非 Linux/BSD 平台使用 API 降级方案
+// 非 Linux/FreeBSD 平台使用 API 降级方案 (macOS, OpenBSD, NetBSD, Windows, etc.)
 // ============================================================================
 
-/// 非 Linux/Unix 平台使用 API 降级方案
-#[cfg(not(any(
-    target_os = "linux",
-    target_os = "macos",
-    target_os = "freebsd",
-    target_os = "openbsd",
-    target_os = "netbsd"
-)))]
+/// 非 Linux/FreeBSD 平台使用 API 降级方案
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 pub async fn get_from_interface(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info>> {
     Err(anyhow::anyhow!(
         "Interface method not supported on this platform, using API fallback for: {}",

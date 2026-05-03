@@ -14,7 +14,6 @@
                 "https://v6.ipv6-test.com/api/myip.php"
             ]
         },
-        "log_output": "shell",
         "proxy": ""
     },
     "records": [

@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// 默认配置值
-pub const DEFAULT_LOG_OUTPUT: &str = "shell";
 pub const DEFAULT_CLOUDFLARE_TTL: u32 = 180;
 pub const DEFAULT_ALIYUN_TTL: u32 = 600;
 pub const DEFAULT_TIMEOUT_SECONDS: u64 = 300;
@@ -23,8 +22,6 @@ pub struct IpSource {
 pub struct GeneralConfig {
     #[serde(default)]
     pub get_ip: IpSource,
-    #[serde(default)]
-    pub log_output: String,
     #[serde(default)]
     pub proxy: String,
 }
