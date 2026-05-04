@@ -86,6 +86,33 @@ impl HttpClient {
 
         Ok(HttpResponse { status_code, body })
     }
+
+    /// PUT 请求
+    pub async fn put(
+        &self,
+        url: &str,
+        body: &str,
+        headers: Option<&HashMap<String, String>>,
+        timeout_secs: u64,
+    ) -> anyhow::Result<HttpResponse> {
+        let mut request = self.client.put(url).body(body.to_string());
+
+        if let Some(hdrs) = headers {
+            for (key, value) in hdrs {
+                request = request.header(key, value);
+            }
+        }
+
+        let response = request
+            .timeout(Duration::from_secs(timeout_secs))
+            .send()
+            .await?;
+
+        let status_code = response.status().as_u16();
+        let body = response.text().await?;
+
+        Ok(HttpResponse { status_code, body })
+    }
 }
 
 impl Default for HttpClient {
@@ -149,6 +176,39 @@ pub async fn post_with_retry(
         }
 
         match client.post(url, body, headers, timeout_secs).await {
+            Ok(response) => return Ok(response),
+            Err(e) => {
+                last_error = Some(e);
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Unknown error")))
+}
+
+/// 带重试的 PUT 请求
+pub async fn put_with_retry(
+    url: &str,
+    body: &str,
+    headers: Option<&HashMap<String, String>>,
+    timeout_secs: u64,
+    max_retries: usize,
+    proxy_url: Option<&str>,
+) -> anyhow::Result<HttpResponse> {
+    let client = if let Some(proxy) = proxy_url {
+        HttpClient::with_proxy(proxy)?
+    } else {
+        HttpClient::new()?
+    };
+
+    let mut last_error = None;
+
+    for attempt in 0..=max_retries {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(100 * (1 << attempt))).await;
+        }
+
+        match client.put(url, body, headers, timeout_secs).await {
             Ok(response) => return Ok(response),
             Err(e) => {
                 last_error = Some(e);

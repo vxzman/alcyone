@@ -44,8 +44,8 @@ enum Commands {
         #[arg(short = 'd', long = "dir", default_value = "")]
         dir: String,
 
-        /// 忽略缓存
-        #[arg(short = 'i', long = "ignore-cache", default_value = "false")]
+        /// 忽略缓存，强制进行 DDNS 更新
+        #[arg(short = 'i', long = "ignore", default_value = "false")]
         ignore_cache: bool,
 
         /// 超时时间（秒）
@@ -139,8 +139,11 @@ async fn update_cloudflare_record(
     }
 
     let ttl = if record.ttl > 0 { record.ttl } else { cf_config.ttl.max(DEFAULT_CLOUDFLARE_TTL) };
+    // Cloudflare 要求非代理记录 TTL >= 300（免费账户）
+    let proxied = record.proxied || cf_config.proxied;
+    let ttl = if !proxied && ttl < 300 { 300 } else { ttl };
     let mut extra = HashMap::new();
-    if record.proxied || cf_config.proxied {
+    if proxied {
         extra.insert("proxied".to_string(), "true".to_string());
     }
 
@@ -247,12 +250,17 @@ async fn main() {
             // 检查缓存
             let cache_file = work_dir.join("cache.lastip");
             let last_ip = read_last_ip(&cache_file);
-            if !ignore_cache && !last_ip.is_empty() {
-                if last_ip == current_ip {
-                    log::info(&format!("IP has not changed: {}", current_ip));
-                } else {
-                    log::info(&format!("IP changed from {} to {}", last_ip, current_ip));
-                }
+
+            if !ignore_cache && !last_ip.is_empty() && last_ip == current_ip {
+                log::info(&format!("IP unchanged: {}", current_ip));
+                log::info("Skipping DDNS update to reduce API calls");
+                return;
+            }
+
+            if !last_ip.is_empty() {
+                log::info(&format!("IP changed from {} to {}", last_ip, current_ip));
+            } else {
+                log::info(&format!("First run or cache empty, updating DDNS"));
             }
 
             // Zone ID 缓存
@@ -291,7 +299,7 @@ async fn main() {
             log::info(&format!("Update completed: {} succeeded, {} failed", success_count, fail_count));
 
             // 更新缓存
-            if success_count > 0 && last_ip != current_ip {
+            if success_count > 0 {
                 if let Err(e) = write_last_ip(&cache_file, &current_ip) {
                     log::warning(&format!("Warning: failed to write cache: {}", e));
                 }

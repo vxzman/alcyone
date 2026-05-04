@@ -1,6 +1,6 @@
 //! Cloudflare DNS 提供商
 
-use crate::http::{get_with_retry, post_with_retry};
+use crate::http::{get_with_retry, post_with_retry, put_with_retry};
 use crate::utils::logger;
 use crate::dns::provider::DNSProvider;
 use serde::{Deserialize, Serialize};
@@ -47,6 +47,9 @@ struct CloudflareDnsCreateRequest {
 
 #[derive(Debug, Serialize)]
 struct CloudflareDnsUpdateRequest {
+    #[serde(rename = "type")]
+    record_type: String,
+    name: String,
     content: String,
     ttl: u32,
     proxied: bool,
@@ -113,14 +116,20 @@ impl CloudflareProvider {
             ("POST", serde_json::to_string(&request)?, format!("{}/zones/{}/dns_records", base_url, zone_id))
         } else {
             // 更新现有记录
-            let request = CloudflareDnsUpdateRequest { content: ip.to_string(), ttl, proxied };
+            let request = CloudflareDnsUpdateRequest {
+                record_type: "AAAA".to_string(),
+                name: full_domain.to_string(),
+                content: ip.to_string(),
+                ttl,
+                proxied,
+            };
             ("PUT", serde_json::to_string(&request)?, format!("{}/zones/{}/dns_records/{}", base_url, zone_id, dns_response.result[0].id))
         };
 
         let response = if method == "POST" {
             post_with_retry(&record_url, &body, Some(&headers), 15, 2, None).await?
         } else {
-            post_with_retry(&record_url, &body, Some(&headers), 15, 2, None).await?
+            put_with_retry(&record_url, &body, Some(&headers), 15, 2, None).await?
         };
 
         if response.status_code != 200 {

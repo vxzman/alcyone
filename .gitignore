@@ -2,3 +2,4 @@
 .qwen/
 config.json
 *log
+cache.lastip

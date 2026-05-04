@@ -73,17 +73,38 @@ pub fn populate_info(info: &mut Ipv6Info) {
 /// Linux Netlink 实现（使用 rtnetlink 库）
 #[cfg(target_os = "linux")]
 pub async fn get_from_interface(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info>> {
-    use rtnetlink::new_connection;
     use futures::TryStreamExt;
+    use netlink_packet_route::{
+        address::AddressAttribute,
+        link::LinkAttribute,
+        AddressFamily,
+    };
 
     // 1. 创建 netlink 连接
-    let (connection, handle, _) = new_connection()?;
-    
+    let (connection, handle, _) = rtnetlink::new_connection()?;
+
     // 2. 启动连接（在后台运行）
     tokio::spawn(connection);
 
-    // 3. 获取网卡索引（使用 match_name）
-    let iface_idx = get_interface_index(&handle, iface_name).await?;
+    // 3. 获取网卡索引
+    let iface_idx = {
+        let mut links = handle.link().get().execute();
+        let mut idx = None;
+        while let Some(msg) = links.try_next().await? {
+            let name = msg.attributes.iter().find_map(|attr| {
+                if let LinkAttribute::IfName(n) = attr {
+                    Some(n)
+                } else {
+                    None
+                }
+            });
+            if name == Some(&iface_name.to_string()) {
+                idx = Some(msg.header.index);
+                break;
+            }
+        }
+        idx.ok_or_else(|| anyhow::anyhow!("Interface not found: {}", iface_name))?
+    };
 
     // 4. 获取该网卡的所有地址
     let mut addresses = handle
@@ -93,42 +114,46 @@ pub async fn get_from_interface(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info
         .execute();
 
     let mut result = Vec::new();
+    let mut _seen_any_ipv6 = false;
 
     while let Some(msg) = addresses.try_next().await? {
-        // 检查是否是 IPv6 地址（2 = AF_INET6）
-        if msg.header.family != 2 {
+        // 检查是否是 IPv6 地址
+        if msg.header.family != AddressFamily::Inet6 {
             continue;
         }
+        _seen_any_ipv6 = true;
 
-        // 5. 解析地址属性（使用 nlas 字段）
-        let mut ipv6_addr: Option<Ipv6Addr> = None;
+        let mut ipv6_addr: Option<std::net::IpAddr> = None;
         let mut preferred_lft: u32 = 0;
         let mut valid_lft: u32 = 0;
 
-        use netlink_packet_route::nlas::address::Nla;
-        for attr in msg.nlas {
+        for attr in msg.attributes {
             match attr {
-                Nla::Address(addr) | Nla::Local(addr)
-                    if addr.len() == 16 => {
-                        let mut bytes = [0u8; 16];
-                        bytes.copy_from_slice(&addr);
-                        ipv6_addr = Some(Ipv6Addr::from(bytes));
+                AddressAttribute::Address(addr) => {
+                    if let std::net::IpAddr::V6(v6) = addr {
+                        ipv6_addr = Some(std::net::IpAddr::V6(v6));
                     }
-                Nla::CacheInfo(cache)
-                    // cache 是 Vec<u8>, 需要手动解析 ifa_cacheinfo 结构
-                    // ifa_cacheinfo: 4 个 u32 (preferred, valid, cstamp, tstamp)
-                    if cache.len() >= 16 => {
-                        preferred_lft = u32::from_ne_bytes([cache[0], cache[1], cache[2], cache[3]]);
-                        valid_lft = u32::from_ne_bytes([cache[4], cache[5], cache[6], cache[7]]);
-                    }
+                }
+                AddressAttribute::CacheInfo(cache_info) => {
+                    // ifa_valid: 有效生命周期(秒), 0xFFFFFFFF = forever
+                    // ifa_preferred: 首选生命周期(秒), 0xFFFFFFFF = forever
+                    valid_lft = if cache_info.ifa_valid == 0xFFFFFFFF {
+                        ND6_INFINITE_LIFETIME
+                    } else {
+                        cache_info.ifa_valid
+                    };
+                    preferred_lft = if cache_info.ifa_preferred == 0xFFFFFFFF {
+                        ND6_INFINITE_LIFETIME
+                    } else {
+                        cache_info.ifa_preferred
+                    };
+                }
                 _ => {}
             }
         }
 
-        let flags = msg.header.flags;
-
-        // 6. 构建 IPv6Info
-        if let Some(addr) = ipv6_addr {
+        // 5. 构建 IPv6Info
+        if let Some(std::net::IpAddr::V6(addr)) = ipv6_addr {
             // 跳过链路本地和回环地址
             if is_link_local(&addr) || is_loopback(&addr) {
                 continue;
@@ -151,7 +176,7 @@ pub async fn get_from_interface(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info
                 } else {
                     valid_lft as i64
                 },
-                is_deprecated: (flags as u32 & 0x20) != 0, // IFA_F_DEPRECATED
+                is_deprecated: false,
                 ..Default::default()
             };
 
@@ -171,25 +196,6 @@ pub async fn get_from_interface(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info
     } else {
         Ok(result)
     }
-}
-
-/// 获取网卡索引
-#[cfg(target_os = "linux")]
-async fn get_interface_index(handle: &rtnetlink::Handle, iface_name: &str) -> anyhow::Result<u32> {
-    use futures::TryStreamExt;
-
-    // 使用 match_name 过滤
-    let mut links = handle
-        .link()
-        .get()
-        .match_name(iface_name.to_string())
-        .execute();
-    
-    if let Some(msg) = links.try_next().await? {
-        return Ok(msg.header.index);
-    }
-
-    Err(anyhow::anyhow!("Interface not found: {}", iface_name))
 }
 
 // ============================================================================
@@ -594,52 +600,70 @@ pub async fn get_from_interface(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info
     ))
 }
 
-/// 从 HTTP API 获取 IPv6 地址
+/// 从 HTTP API 获取 IPv6 地址（并发查询，返回第一个成功的结果）
 pub async fn get_from_apis(urls: &[String]) -> anyhow::Result<Vec<Ipv6Info>> {
     if urls.is_empty() {
         return Err(anyhow::anyhow!("No API URLs configured"));
     }
 
-    let mut last_error = None;
+    // 并发发起所有请求
+    let mut handles = Vec::new();
 
     for url in urls {
         log::info(&format!("Querying API: {}", url));
 
-        match http::get_with_retry(url, None, 15, 2, None).await {
-            Ok(response) => {
-                // 解析响应：提取第一行并去除空白
-                let ip = response
-                    .body
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
+        let url_clone = url.clone();
+        let handle = tokio::spawn(async move {
+            match http::get_with_retry(&url_clone, None, 15, 2, None).await {
+                Ok(response) => {
+                    let ip = response
+                        .body
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
 
-                if !ip.is_empty() {
-                    log::info(&format!("API {} succeeded: {}", url, ip));
-
-                    let mut info = Ipv6Info {
-                        ip,
-                        preferred_lft: INFINITE_LIFETIME_SECONDS,
-                        valid_lft: INFINITE_LIFETIME_SECONDS,
-                        ..Default::default()
-                    };
-
-                    populate_info(&mut info);
-                    return Ok(vec![info]);
+                    if !ip.is_empty() {
+                        Some((url_clone, ip))
+                    } else {
+                        None
+                    }
                 }
-
-                log::error(&format!("API {} returned empty response", url));
+                Err(_) => None,
             }
-            Err(e) => {
-                log::error(&format!("API {} failed: {}", url, e));
-                last_error = Some(e);
+        });
+
+        handles.push(handle);
+    }
+
+    // 使用 futures::stream 等待第一个成功的结果
+    use futures::stream::StreamExt;
+    let mut stream = futures::stream::iter(handles)
+        .buffer_unordered(urls.len());
+
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(Some((url, ip))) => {
+                log::info(&format!("API {} succeeded: {}", url, ip));
+
+                let mut info = Ipv6Info {
+                    ip,
+                    preferred_lft: INFINITE_LIFETIME_SECONDS,
+                    valid_lft: INFINITE_LIFETIME_SECONDS,
+                    ..Default::default()
+                };
+
+                populate_info(&mut info);
+                return Ok(vec![info]);
+            }
+            _ => {
+                // 继续等待其他结果
             }
         }
     }
 
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("All API requests failed")))
+    Err(anyhow::anyhow!("All API requests failed"))
 }
 
 /// 选择最佳的 IPv6 地址（优先选择 preferred_lft 最长的）

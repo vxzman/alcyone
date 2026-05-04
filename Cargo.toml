@@ -52,8 +52,9 @@ async-trait = "0.1"
 
 # netlink (Linux only)
 [target.'cfg(target_os = "linux")'.dependencies]
-rtnetlink = "0.13"
-netlink-packet-route = "0.17"
+rtnetlink = "0.14"
+netlink-packet-route = "0.19"
+netlink-packet-core = "0.7"
 netlink-sys = "0.8"
 
 [profile.release]

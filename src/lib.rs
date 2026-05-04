@@ -11,6 +11,6 @@ pub mod dns;
 
 // 重新导出常用类型
 pub use config::{Config, RecordConfig, ConfigLoader, load_config};
-pub use cache::{read_last_ip, write_last_ip, read_zone_id_cache, update_zone_id_cache};
+pub use cache::{read_last_ip, write_last_ip, read_ip_history, read_zone_id_cache, update_zone_id_cache};
 pub use ip::{Ipv6Info, get_from_interface, get_from_apis, select_best};
 pub use dns::{DNSProvider, CloudflareProvider, AliyunProvider};
