@@ -1,3 +1,6 @@
+[workspace]
+members = ["crates/ifaddr6"]
+
 [package]
 name = "alcyone"
 version = "0.1.0"
@@ -7,6 +10,7 @@ authors = ["Alcyone Team"]
 license = "MIT"
 
 [dependencies]
+ifaddr6 = { path = "crates/ifaddr6" }
 # JSON 处理
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -22,9 +26,6 @@ futures = "0.3"
 
 # libc (BSD)
 libc = "0.2"
-
-# nix (BSD ioctl)
-nix = { version = "0.27", features = ["ioctl", "net"] }
 
 # 命令行参数解析
 clap = { version = "4.4", features = ["derive"] }

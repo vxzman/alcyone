@@ -10,6 +10,7 @@ fn is_link_local(addr: &Ipv6Addr) -> bool {
 }
 
 /// 检查是否是回环地址 (::1)
+#[cfg(target_os = "linux")]
 fn is_loopback(addr: &Ipv6Addr) -> bool {
     addr.octets()[0..15].iter().all(|&b| b == 0) && addr.octets()[15] == 1
 }
@@ -20,6 +21,7 @@ fn is_ula(addr: &Ipv6Addr) -> bool {
 }
 
 /// 格式化 IPv6 地址
+#[cfg(target_os = "linux")]
 fn format_ipv6(addr: &Ipv6Addr) -> String {
     addr.to_string()
 }
@@ -164,6 +166,8 @@ pub async fn get_from_interface(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info
                 continue;
             }
 
+            let is_temporary = addr.octets()[8] & 0x80 != 0;
+
             let mut info = Ipv6Info {
                 ip: format_ipv6(&addr),
                 preferred_lft: if preferred_lft == ND6_INFINITE_LIFETIME {
@@ -177,6 +181,7 @@ pub async fn get_from_interface(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info
                     valid_lft as i64
                 },
                 is_deprecated: false,
+                is_temporary,
                 ..Default::default()
             };
 
@@ -199,381 +204,38 @@ pub async fn get_from_interface(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info
 }
 
 // ============================================================================
-// FreeBSD 实现 (使用 sysctl 获取 IPv6 地址和生命周期)
+// FreeBSD 实现 (使用 ifaddr6 crate)
 // ============================================================================
 
-// FreeBSD 平台级别定义
-#[cfg(target_os = "freebsd")]
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct FreeBsdSockaddrIn6 {
-    sin6_len: u8,
-    sin6_family: u8,
-    sin6_port: u16,
-    sin6_flowinfo: u32,
-    sin6_addr: [u8; 16],
-    sin6_scope_id: u32,
-}
-
-#[cfg(target_os = "freebsd")]
-#[repr(C)]
-struct FreeBsdIfAddrs {
-    ifa_next: *mut FreeBsdIfAddrs,
-    ifa_name: *mut libc::c_char,
-    ifa_flags: libc::c_uint,
-    ifa_addr: *mut libc::sockaddr,
-    ifa_netmask: *mut libc::sockaddr,
-    ifa_dstaddr: *mut libc::sockaddr,
-    ifa_data: *mut libc::c_void,
-}
-
-#[cfg(target_os = "freebsd")]
-extern "C" {
-    fn freeifaddrs(ifa: *mut FreeBsdIfAddrs);
-}
-
-#[cfg(target_os = "freebsd")]
-struct IfAddrsGuard(*mut FreeBsdIfAddrs);
-
-#[cfg(target_os = "freebsd")]
-impl Drop for IfAddrsGuard {
-    fn drop(&mut self) {
-        unsafe {
-            if !self.0.is_null() {
-                freeifaddrs(self.0);
-            }
-        }
-    }
-}
-
-/// FreeBSD 使用 sysctl 实现
+/// FreeBSD 实现 (使用 ifaddr6 crate)
 #[cfg(target_os = "freebsd")]
 pub async fn get_from_interface(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info>> {
-    use std::ffi::CStr;
-    use std::ptr;
+    use ifaddr6::get_addresses;
 
-    // 定义 nd6_lifetime 结构
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct nd6_lifetime {
-        ntl_preferred: u32,
-        ntl_valid: u32,
-    }
+    let raw_addrs = get_addresses(iface_name).await.map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    // 定义 in6_ifaddr 结构（简化版，只包含我们需要的字段）
-    #[repr(C)]
-    struct in6_ifaddr {
-        ia_addr: FreeBsdSockaddrIn6,
-        ia_netmask: *mut FreeBsdSockaddrIn6,
-        ia_dstaddr: *mut FreeBsdSockaddrIn6,
-        _pad: [u8; 16],  // 填充，跳过一些不需要的字段
-        ia6_lifetime: nd6_lifetime,
-    }
-
-    // sysctl 外部函数声明
-    extern "C" {
-        fn sysctl(
-            name: *mut libc::c_int,
-            namelen: libc::c_uint,
-            oldp: *mut libc::c_void,
-            oldlenp: *mut libc::size_t,
-            newp: *mut libc::c_void,
-            newlen: libc::size_t,
-        ) -> libc::c_int;
-    }
-
-    // getifaddrs 外部函数声明
-    extern "C" {
-        fn getifaddrs(ifap: *mut *mut FreeBsdIfAddrs) -> libc::c_int;
-    }
-
-    // ========================================================================
-    // 步骤 1: 使用 sysctl 获取 IPv6 地址列表（包含生命周期）
-    // ========================================================================
-
-    // 构建 sysctl MIB: CTL_NET.AF_INET6.IPPROTO_IPV6.IPV6CTL_ADDRLIST
-    let mut mib = [
-        libc::CTL_NET as i32,
-        libc::AF_INET6 as i32,
-        libc::IPPROTO_IPV6 as i32,
-        22 as i32,  // IPV6CTL_ADDRLIST
-    ];
-
-    // 第一次调用 sysctl 获取缓冲区大小
-    let mut buf_size: libc::size_t = 0;
-    let ret = unsafe {
-        sysctl(
-            mib.as_mut_ptr(),
-            mib.len() as libc::c_uint,
-            ptr::null_mut(),
-            &mut buf_size,
-            ptr::null_mut(),
-            0,
-        )
-    };
-    
-    if ret != 0 || buf_size == 0 {
-        // sysctl 失败，降级到 getifaddrs
-        log::info("sysctl IPV6CTL_ADDRLIST not available, using getifaddrs fallback");
-        return get_from_interface_fallback(iface_name);
-    }
-
-    // 分配缓冲区
-    let mut buf = vec![0u8; buf_size];
-    
-    // 第二次调用获取实际数据
-    let ret = unsafe {
-        sysctl(
-            mib.as_mut_ptr(),
-            mib.len() as libc::c_uint,
-            buf.as_mut_ptr() as *mut libc::c_void,
-            &mut buf_size,
-            ptr::null_mut(),
-            0,
-        )
-    };
-    
-    if ret != 0 {
-        log::info("sysctl IPV6CTL_ADDRLIST failed, using getifaddrs fallback");
-        return get_from_interface_fallback(iface_name);
-    }
-
-    // ========================================================================
-    // 步骤 2: 解析 sysctl 返回的数据
-    // ========================================================================
-    
-    // sysctl 返回的是 in6_ifaddr 结构链表
-    let mut ipv6_map: std::collections::HashMap<String, (u32, u32)> = std::collections::HashMap::new();
-    
-    // 遍历缓冲区，解析 in6_ifaddr 结构
-    let mut offset = 0;
-    while offset + std::mem::size_of::<in6_ifaddr>() <= buf.len() {
-        let ifa_ptr = unsafe {
-            buf.as_ptr().add(offset) as *const in6_ifaddr
-        };
-        
-        let ifa = unsafe { &*ifa_ptr };
-        
-        // 提取 IPv6 地址
-        let ipv6_addr = Ipv6Addr::from(ifa.ia_addr.sin6_addr);
-        let ip_str = format_ipv6(&ipv6_addr);
-        
-        // 提取生命周期
-        let preferred_lft = ifa.ia6_lifetime.ntl_preferred;
-        let valid_lft = ifa.ia6_lifetime.ntl_valid;
-        
-        // 存储到映射中
-        ipv6_map.insert(ip_str, (preferred_lft, valid_lft));
-        
-        // 移动到下一个结构
-        offset += std::mem::size_of::<in6_ifaddr>();
-        
-        // 如果生命周期为 0，可能是链表结束
-        if valid_lft == 0 && preferred_lft == 0 {
-            break;
-        }
-    }
-
-    // ========================================================================
-    // 步骤 3: 使用 getifaddrs 获取网卡名称关联
-    // ========================================================================
-
-    let mut ifap: *mut FreeBsdIfAddrs = ptr::null_mut();
-    let ret = unsafe { getifaddrs(&mut ifap) };
-    if ret != 0 {
-        return Err(anyhow::anyhow!("getifaddrs failed: {}", std::io::Error::last_os_error()));
-    }
-    
-    let _guard = IfAddrsGuard(ifap);
-    
     let mut result = Vec::new();
-    let mut ifa = ifap;
-    
-    unsafe {
-        while !ifa.is_null() {
-            let ifa_ref = &*ifa;
-            
-            // 检查网卡名称
-            let matches_name = if !ifa_ref.ifa_name.is_null() {
-                let name_cstr = CStr::from_ptr(ifa_ref.ifa_name);
-                let name = name_cstr.to_string_lossy();
-                name == iface_name
+    for raw in &raw_addrs {
+        let mut info = Ipv6Info {
+            ip: raw.address.clone(),
+            preferred_lft: if raw.preferred_lft == u32::MAX {
+                INFINITE_LIFETIME_SECONDS
             } else {
-                false
-            };
-            
-            if !matches_name {
-                ifa = (*ifa).ifa_next;
-                continue;
-            }
-            
-            // 检查地址族
-            if !ifa_ref.ifa_addr.is_null() {
-                let addr = &*ifa_ref.ifa_addr;
-                if addr.sa_family as i32 != libc::AF_INET6 {
-                    ifa = (*ifa).ifa_next;
-                    continue;
-                }
-                
-                // 转换为 FreeBsdSockaddrIn6
-                let sin6 = &*(ifa_ref.ifa_addr as *const FreeBsdSockaddrIn6);
-                let ipv6_addr = Ipv6Addr::from(sin6.sin6_addr);
-                
-                // 跳过链路本地地址
-                if is_link_local(&ipv6_addr) {
-                    ifa = (*ifa).ifa_next;
-                    continue;
-                }
-                
-                // 跳过回环地址
-                if is_loopback(&ipv6_addr) {
-                    ifa = (*ifa).ifa_next;
-                    continue;
-                }
-                
-                // 跳过 ULA
-                if is_ula(&ipv6_addr) {
-                    ifa = (*ifa).ifa_next;
-                    continue;
-                }
-                
-                // 检查网卡是否运行中
-                if (ifa_ref.ifa_flags & (libc::IFF_RUNNING as libc::c_uint)) == 0 {
-                    ifa = (*ifa).ifa_next;
-                    continue;
-                }
-                
-                // 从映射中获取生命周期
-                let ip_str = format_ipv6(&ipv6_addr);
-                let (preferred_lft, valid_lft) = ipv6_map.get(&ip_str)
-                    .copied()
-                    .unwrap_or((ND6_INFINITE_LIFETIME, ND6_INFINITE_LIFETIME));
-                
-                let mut info = Ipv6Info {
-                    ip: ip_str,
-                    preferred_lft: if preferred_lft == ND6_INFINITE_LIFETIME {
-                        INFINITE_LIFETIME_SECONDS
-                    } else {
-                        preferred_lft as i64
-                    },
-                    valid_lft: if valid_lft == ND6_INFINITE_LIFETIME {
-                        INFINITE_LIFETIME_SECONDS
-                    } else {
-                        valid_lft as i64
-                    },
-                    is_deprecated: preferred_lft == 0 && valid_lft > 0,
-                    ..Default::default()
-                };
-                
-                populate_info(&mut info);
-                
-                if info.is_candidate {
-                    result.push(info);
-                }
-            }
-            
-            ifa = (*ifa).ifa_next;
-        }
-    }
-    
-    if result.is_empty() {
-        Err(anyhow::anyhow!(
-            "No suitable IPv6 address on interface {}",
-            iface_name
-        ))
-    } else {
-        Ok(result)
-    }
-}
+                raw.preferred_lft as i64
+            },
+            valid_lft: if raw.valid_lft == u32::MAX {
+                INFINITE_LIFETIME_SECONDS
+            } else {
+                raw.valid_lft as i64
+            },
+            is_deprecated: false,
+            is_temporary: raw.is_temporary,
+            ..Default::default()
+        };
+        populate_info(&mut info);
 
-/// FreeBSD 降级方案（仅使用 getifaddrs，无生命周期）
-#[cfg(target_os = "freebsd")]
-fn get_from_interface_fallback(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info>> {
-    use std::ffi::CStr;
-    use std::ptr;
-
-    // 外部函数声明
-    extern "C" {
-        fn getifaddrs(ifap: *mut *mut FreeBsdIfAddrs) -> libc::c_int;
-    }
-
-    let mut ifap: *mut FreeBsdIfAddrs = ptr::null_mut();
-    let ret = unsafe { getifaddrs(&mut ifap) };
-    if ret != 0 {
-        return Err(anyhow::anyhow!("getifaddrs failed: {}", std::io::Error::last_os_error()));
-    }
-
-    let _guard = IfAddrsGuard(ifap);
-    let mut result = Vec::new();
-    let mut ifa = ifap;
-
-    unsafe {
-        while !ifa.is_null() {
-            let ifa_ref = &*ifa;
-
-            // 检查网卡名称
-            if !ifa_ref.ifa_name.is_null() {
-                let name_cstr = CStr::from_ptr(ifa_ref.ifa_name);
-                let name = name_cstr.to_string_lossy();
-                if name != iface_name {
-                    ifa = (*ifa).ifa_next;
-                    continue;
-                }
-            }
-
-            // 检查地址族
-            if !ifa_ref.ifa_addr.is_null() {
-                let addr = &*ifa_ref.ifa_addr;
-                if addr.sa_family as i32 != libc::AF_INET6 {
-                    ifa = (*ifa).ifa_next;
-                    continue;
-                }
-
-                // 转换为 FreeBsdSockaddrIn6
-                let sin6 = &*(ifa_ref.ifa_addr as *const FreeBsdSockaddrIn6);
-                let ipv6_addr = Ipv6Addr::from(sin6.sin6_addr);
-
-                // 跳过链路本地地址
-                if is_link_local(&ipv6_addr) {
-                    ifa = (*ifa).ifa_next;
-                    continue;
-                }
-
-                // 跳过回环地址
-                if is_loopback(&ipv6_addr) {
-                    ifa = (*ifa).ifa_next;
-                    continue;
-                }
-
-                // 跳过 ULA
-                if is_ula(&ipv6_addr) {
-                    ifa = (*ifa).ifa_next;
-                    continue;
-                }
-
-                // 检查网卡是否运行中
-                if (ifa_ref.ifa_flags & (libc::IFF_RUNNING as libc::c_uint)) == 0 {
-                    ifa = (*ifa).ifa_next;
-                    continue;
-                }
-
-                // 使用默认生命周期
-                let mut info = Ipv6Info {
-                    ip: format_ipv6(&ipv6_addr),
-                    preferred_lft: INFINITE_LIFETIME_SECONDS,
-                    valid_lft: INFINITE_LIFETIME_SECONDS,
-                    is_deprecated: false,
-                    ..Default::default()
-                };
-
-                populate_info(&mut info);
-
-                if info.is_candidate {
-                    result.push(info);
-                }
-            }
-
-            ifa = (*ifa).ifa_next;
+        if info.is_candidate {
+            result.push(info);
         }
     }
 
@@ -666,7 +328,8 @@ pub async fn get_from_apis(urls: &[String]) -> anyhow::Result<Vec<Ipv6Info>> {
     Err(anyhow::anyhow!("All API requests failed"))
 }
 
-/// 选择最佳的 IPv6 地址（优先选择 preferred_lft 最长的）
+/// 选择最佳的 IPv6 地址
+/// 优先选择非临时地址，然后选择 preferred_lft 最长的
 pub fn select_best(infos: &[Ipv6Info]) -> anyhow::Result<String> {
     let candidates: Vec<&Ipv6Info> = infos.iter().filter(|i| i.is_candidate).collect();
 
@@ -674,10 +337,14 @@ pub fn select_best(infos: &[Ipv6Info]) -> anyhow::Result<String> {
         return Err(anyhow::anyhow!("No suitable global unicast IPv6 candidate found"));
     }
 
-    // 选择 preferred_lft 最长的地址
+    // 优先选择非临时地址，然后在同类中选择 preferred_lft 最长的
     let best = candidates
         .iter()
-        .max_by_key(|i| i.preferred_lft)
+        .max_by_key(|i| {
+            // 非临时地址优先 (weight: 2), 临时地址降级 (weight: 1)
+            let stability = if i.is_temporary { 1i64 } else { 2i64 };
+            stability * 1_000_000_000 + i.preferred_lft
+        })
         .unwrap();
 
     Ok(best.ip.clone())

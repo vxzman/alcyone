@@ -1,0 +1,16 @@
+[package]
+name = "ifaddr6"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-platform IPv6 address discovery with lifetime information"
+license = "MIT"
+readme = "README.md"
+repository = ""
+categories = ["network-programming", "os"]
+keywords = ["ipv6", "network", "interface", "getifaddrs", "lifetime"]
+
+[dependencies]
+thiserror = "1.0"
+
+[build-dependencies]
+cc = "1.0"

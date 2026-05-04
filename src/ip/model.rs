@@ -10,6 +10,7 @@ pub struct Ipv6Info {
     pub valid_lft: i64,
     pub is_deprecated: bool,
     pub is_unique_local: bool,
+    pub is_temporary: bool,
     pub is_candidate: bool,
 }
 
