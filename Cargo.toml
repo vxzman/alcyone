@@ -17,11 +17,6 @@ reqwest = { version = "0.11", features = ["json"], default-features = false }
 # 异步运行时
 tokio = { version = "1", features = ["full"] }
 
-# netlink (Linux)
-rtnetlink = "0.13"
-netlink-packet-route = "0.17"
-netlink-sys = "0.8"
-
 # futures
 futures = "0.3"
 
@@ -54,6 +49,12 @@ percent-encoding = "2.3"
 
 # 异步 trait
 async-trait = "0.1"
+
+# netlink (Linux only)
+[target.'cfg(target_os = "linux")'.dependencies]
+rtnetlink = "0.13"
+netlink-packet-route = "0.17"
+netlink-sys = "0.8"
 
 [profile.release]
 opt-level = 3

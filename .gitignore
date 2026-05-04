@@ -1,1 +1,4 @@
 /target
+.qwen/
+config.json
+*log

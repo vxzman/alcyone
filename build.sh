@@ -1,21 +1,28 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -e
 
 VERSION="${1:-dev}"
+PROFILE="${2:-debug}"
 
-echo "Building alcyone v${VERSION}..."
+echo "Building alcyone v${VERSION} (${PROFILE})..."
 
-# 设置版本信息
+# 设置版本信息 (通过 build.rs 注入到二进制)
 export APP_VERSION="${VERSION}"
 export APP_COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
 export APP_BUILD_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-# 构建 release 版本
-cargo build --release
+# 构建
+if [ "$PROFILE" = "release" ]; then
+    cargo build --release
+    BINARY="target/release/alcyone"
+else
+    cargo build
+    BINARY="target/debug/alcyone"
+fi
 
 echo ""
 echo "Build completed successfully!"
-echo "Binary: target/release/alcyone"
-echo "Version: ${APP_VERSION}"
+echo "Binary: ${BINARY}"
+echo "Version: ${VERSION}"
 echo "Commit: ${APP_COMMIT}"
 echo "Build Date: ${APP_BUILD_DATE}"

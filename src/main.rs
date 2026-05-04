@@ -14,12 +14,18 @@ use std::sync::Arc;
 use std::collections::HashMap;
 
 /// 版本信息
-const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const APP_VERSION: &str = env!("APP_VERSION");
+const LONG_VERSION: &str = concat!(
+    "v", env!("APP_VERSION"),
+    "\nCommit: ", env!("APP_COMMIT"),
+    "\nBuild Date: ", env!("APP_BUILD_DATE")
+);
 
 /// 强大的动态 DNS 客户端
 #[derive(Parser, Debug)]
 #[command(name = "alcyone")]
 #[command(version = APP_VERSION)]
+#[command(long_version = LONG_VERSION)]
 #[command(about = "强大的动态 DNS 客户端 - 支持多域名多服务商", long_about = None)]
 struct Cli {
     #[command(subcommand)]

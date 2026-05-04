@@ -196,24 +196,55 @@ async fn get_interface_index(handle: &rtnetlink::Handle, iface_name: &str) -> an
 // FreeBSD 实现 (使用 sysctl 获取 IPv6 地址和生命周期)
 // ============================================================================
 
+// FreeBSD 平台级别定义
+#[cfg(target_os = "freebsd")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct FreeBsdSockaddrIn6 {
+    sin6_len: u8,
+    sin6_family: u8,
+    sin6_port: u16,
+    sin6_flowinfo: u32,
+    sin6_addr: [u8; 16],
+    sin6_scope_id: u32,
+}
+
+#[cfg(target_os = "freebsd")]
+#[repr(C)]
+struct FreeBsdIfAddrs {
+    ifa_next: *mut FreeBsdIfAddrs,
+    ifa_name: *mut libc::c_char,
+    ifa_flags: libc::c_uint,
+    ifa_addr: *mut libc::sockaddr,
+    ifa_netmask: *mut libc::sockaddr,
+    ifa_dstaddr: *mut libc::sockaddr,
+    ifa_data: *mut libc::c_void,
+}
+
+#[cfg(target_os = "freebsd")]
+extern "C" {
+    fn freeifaddrs(ifa: *mut FreeBsdIfAddrs);
+}
+
+#[cfg(target_os = "freebsd")]
+struct IfAddrsGuard(*mut FreeBsdIfAddrs);
+
+#[cfg(target_os = "freebsd")]
+impl Drop for IfAddrsGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.0.is_null() {
+                freeifaddrs(self.0);
+            }
+        }
+    }
+}
+
 /// FreeBSD 使用 sysctl 实现
 #[cfg(target_os = "freebsd")]
 pub async fn get_from_interface(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info>> {
     use std::ffi::CStr;
     use std::ptr;
-    use std::slice;
-
-    // 定义 sockaddr_in6 结构
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct sockaddr_in6 {
-        sin6_len: u8,
-        sin6_family: u8,
-        sin6_port: u16,
-        sin6_flowinfo: u32,
-        sin6_addr: [u8; 16],
-        sin6_scope_id: u32,
-    }
 
     // 定义 nd6_lifetime 结构
     #[repr(C)]
@@ -226,23 +257,11 @@ pub async fn get_from_interface(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info
     // 定义 in6_ifaddr 结构（简化版，只包含我们需要的字段）
     #[repr(C)]
     struct in6_ifaddr {
-        ia_addr: sockaddr_in6,
-        ia_netmask: *mut sockaddr_in6,
-        ia_dstaddr: *mut sockaddr_in6,
+        ia_addr: FreeBsdSockaddrIn6,
+        ia_netmask: *mut FreeBsdSockaddrIn6,
+        ia_dstaddr: *mut FreeBsdSockaddrIn6,
         _pad: [u8; 16],  // 填充，跳过一些不需要的字段
         ia6_lifetime: nd6_lifetime,
-    }
-
-    // 定义 ifaddrs 结构（用于获取网卡名称）
-    #[repr(C)]
-    struct ifaddrs {
-        ifa_next: *mut ifaddrs,
-        ifa_name: *mut libc::c_char,
-        ifa_flags: libc::c_uint,
-        ifa_addr: *mut libc::sockaddr,
-        ifa_netmask: *mut libc::sockaddr,
-        ifa_dstaddr: *mut libc::sockaddr,
-        ifa_data: *mut libc::c_void,
     }
 
     // sysctl 外部函数声明
@@ -259,8 +278,7 @@ pub async fn get_from_interface(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info
 
     // getifaddrs 外部函数声明
     extern "C" {
-        fn getifaddrs(ifap: *mut *mut ifaddrs) -> libc::c_int;
-        fn freeifaddrs(ifa: *mut ifaddrs);
+        fn getifaddrs(ifap: *mut *mut FreeBsdIfAddrs) -> libc::c_int;
     }
 
     // ========================================================================
@@ -290,7 +308,7 @@ pub async fn get_from_interface(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info
     
     if ret != 0 || buf_size == 0 {
         // sysctl 失败，降级到 getifaddrs
-        log::info!("sysctl IPV6CTL_ADDRLIST not available, using getifaddrs fallback");
+        log::info("sysctl IPV6CTL_ADDRLIST not available, using getifaddrs fallback");
         return get_from_interface_fallback(iface_name);
     }
 
@@ -310,7 +328,7 @@ pub async fn get_from_interface(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info
     };
     
     if ret != 0 {
-        log::info!("sysctl IPV6CTL_ADDRLIST failed, using getifaddrs fallback");
+        log::info("sysctl IPV6CTL_ADDRLIST failed, using getifaddrs fallback");
         return get_from_interface_fallback(iface_name);
     }
 
@@ -325,7 +343,7 @@ pub async fn get_from_interface(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info
     let mut offset = 0;
     while offset + std::mem::size_of::<in6_ifaddr>() <= buf.len() {
         let ifa_ptr = unsafe {
-            (buf.as_ptr().add(offset) as *const in6_ifaddr)
+            buf.as_ptr().add(offset) as *const in6_ifaddr
         };
         
         let ifa = unsafe { &*ifa_ptr };
@@ -353,8 +371,8 @@ pub async fn get_from_interface(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info
     // ========================================================================
     // 步骤 3: 使用 getifaddrs 获取网卡名称关联
     // ========================================================================
-    
-    let mut ifap: *mut ifaddrs = ptr::null_mut();
+
+    let mut ifap: *mut FreeBsdIfAddrs = ptr::null_mut();
     let ret = unsafe { getifaddrs(&mut ifap) };
     if ret != 0 {
         return Err(anyhow::anyhow!("getifaddrs failed: {}", std::io::Error::last_os_error()));
@@ -391,8 +409,8 @@ pub async fn get_from_interface(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info
                     continue;
                 }
                 
-                // 转换为 sockaddr_in6
-                let sin6 = &*(ifa_ref.ifa_addr as *const sockaddr_in6);
+                // 转换为 FreeBsdSockaddrIn6
+                let sin6 = &*(ifa_ref.ifa_addr as *const FreeBsdSockaddrIn6);
                 let ipv6_addr = Ipv6Addr::from(sin6.sin6_addr);
                 
                 // 跳过链路本地地址
@@ -468,37 +486,12 @@ fn get_from_interface_fallback(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info>
     use std::ffi::CStr;
     use std::ptr;
 
-    // 定义 sockaddr_in6 结构
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct sockaddr_in6 {
-        sin6_len: u8,
-        sin6_family: u8,
-        sin6_port: u16,
-        sin6_flowinfo: u32,
-        sin6_addr: [u8; 16],
-        sin6_scope_id: u32,
-    }
-
-    // 定义 ifaddrs 结构
-    #[repr(C)]
-    struct ifaddrs {
-        ifa_next: *mut ifaddrs,
-        ifa_name: *mut libc::c_char,
-        ifa_flags: libc::c_uint,
-        ifa_addr: *mut libc::sockaddr,
-        ifa_netmask: *mut libc::sockaddr,
-        ifa_dstaddr: *mut libc::sockaddr,
-        ifa_data: *mut libc::c_void,
-    }
-
     // 外部函数声明
     extern "C" {
-        fn getifaddrs(ifap: *mut *mut ifaddrs) -> libc::c_int;
-        fn freeifaddrs(ifa: *mut ifaddrs);
+        fn getifaddrs(ifap: *mut *mut FreeBsdIfAddrs) -> libc::c_int;
     }
 
-    let mut ifap: *mut ifaddrs = ptr::null_mut();
+    let mut ifap: *mut FreeBsdIfAddrs = ptr::null_mut();
     let ret = unsafe { getifaddrs(&mut ifap) };
     if ret != 0 {
         return Err(anyhow::anyhow!("getifaddrs failed: {}", std::io::Error::last_os_error()));
@@ -530,8 +523,8 @@ fn get_from_interface_fallback(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info>
                     continue;
                 }
 
-                // 转换为 sockaddr_in6
-                let sin6 = &*(ifa_ref.ifa_addr as *const sockaddr_in6);
+                // 转换为 FreeBsdSockaddrIn6
+                let sin6 = &*(ifa_ref.ifa_addr as *const FreeBsdSockaddrIn6);
                 let ipv6_addr = Ipv6Addr::from(sin6.sin6_addr);
 
                 // 跳过链路本地地址
@@ -585,20 +578,6 @@ fn get_from_interface_fallback(iface_name: &str) -> anyhow::Result<Vec<Ipv6Info>
         ))
     } else {
         Ok(result)
-    }
-}
-
-#[cfg(target_os = "freebsd")]
-struct IfAddrsGuard(*mut ifaddrs);
-
-#[cfg(target_os = "freebsd")]
-impl Drop for IfAddrsGuard {
-    fn drop(&mut self) {
-        unsafe {
-            if !self.0.is_null() {
-                freeifaddrs(self.0);
-            }
-        }
     }
 }
 
