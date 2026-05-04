@@ -6,6 +6,9 @@ PROFILE="${2:-debug}"
 
 echo "Building alcyone v${VERSION} (${PROFILE})..."
 
+# 强制重新编译 ifaddr6 (C 代码变更不会被 cargo 自动检测)
+touch crates/ifaddr6/build.rs 2>/dev/null || true
+
 # 设置版本信息 (通过 build.rs 注入到二进制)
 export APP_VERSION="${VERSION}"
 export APP_COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
