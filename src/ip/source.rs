@@ -333,6 +333,19 @@ pub async fn get_from_apis(urls: &[String]) -> anyhow::Result<Vec<Ipv6Info>> {
 pub fn select_best(infos: &[Ipv6Info]) -> anyhow::Result<String> {
     let candidates: Vec<&Ipv6Info> = infos.iter().filter(|i| i.is_candidate).collect();
 
+    log::info(&format!(
+        "[select_best] candidates: {:?}",
+        candidates
+            .iter()
+            .map(|c| {
+                format!(
+                    "{}(temp={},pref={})",
+                    c.ip, c.is_temporary, c.preferred_lft
+                )
+            })
+            .collect::<Vec<_>>()
+    ));
+
     if candidates.is_empty() {
         return Err(anyhow::anyhow!("No suitable global unicast IPv6 candidate found"));
     }
@@ -346,6 +359,11 @@ pub fn select_best(infos: &[Ipv6Info]) -> anyhow::Result<String> {
             stability * 1_000_000_000 + i.preferred_lft
         })
         .unwrap();
+
+    log::info(&format!(
+        "[select_best] chosen: {}(temp={},pref={})",
+        best.ip, best.is_temporary, best.preferred_lft
+    ));
 
     Ok(best.ip.clone())
 }
